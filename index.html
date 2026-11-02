@@ -670,116 +670,255 @@ function grabGuide() {
   return cv;
 }
 
-// Grayscale + upscale + contrast stretch, optionally rotated.
-function prepare(src, rot) {
-  const target = 1400;
-  const longSide = Math.max(src.width, src.height);
-  const k = Math.min(4, Math.max(1, target / longSide));
-  const sw = Math.round(src.width * k), sh = Math.round(src.height * k);
+// Grayscale image ops on Uint8ClampedArray (w*h). Shared with the page.
+const IMG = (() => {
+  function stretch(a, cut) {
+    const hist = new Uint32Array(256); for (let i = 0; i < a.length; i++) hist[a[i]]++;
+    const n = a.length; let acc = 0, lo = 0, hi = 255;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > n * cut) { lo = i; break; } }
+    acc = 0; for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > n * cut) { hi = i; break; } }
+    const span = Math.max(1, hi - lo), out = new Uint8ClampedArray(n);
+    for (let i = 0; i < n; i++) out[i] = (a[i] - lo) * 255 / span;
+    return out;
+  }
+  function boxBlur(a, w, h, r) { // separable box blur with clamped edges
+    const tmp = new Float32Array(w * h), out = new Uint8ClampedArray(w * h), d = 2 * r + 1;
+    for (let y = 0; y < h; y++) {
+      const row = y * w; let s = 0;
+      for (let k = -r; k <= r; k++) s += a[row + Math.min(w - 1, Math.max(0, k))];
+      for (let x = 0; x < w; x++) {
+        tmp[row + x] = s / d;
+        s += a[row + Math.min(w - 1, x + r + 1)] - a[row + Math.max(0, x - r)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) s += tmp[Math.min(h - 1, Math.max(0, k)) * w + x];
+      for (let y = 0; y < h; y++) {
+        out[y * w + x] = s / d;
+        s += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+      }
+    }
+    return out;
+  }
+  function blur(a, w, h, r) { let o = a; for (let i = 0; i < 3; i++) o = boxBlur(o, w, h, Math.max(1, Math.round(r / 1.7))); return o; }
+  function median(a, w, h, r) {
+    const out = new Uint8ClampedArray(w * h), hist = new Uint16Array(256), half = ((2 * r + 1) ** 2 >> 1);
+    for (let y = 0; y < h; y++) {
+      hist.fill(0);
+      for (let dy = -r; dy <= r; dy++) { const yy = Math.min(h - 1, Math.max(0, y + dy)) * w; for (let dx = -r; dx <= r; dx++) hist[a[yy + Math.min(w - 1, Math.max(0, dx))]]++; }
+      for (let x = 0; x < w; x++) {
+        let c = 0, m = 0; for (; m < 256; m++) { c += hist[m]; if (c > half) break; }
+        out[y * w + x] = m;
+        const xo = Math.max(0, x - r), xn = Math.min(w - 1, x + r + 1);
+        for (let dy = -r; dy <= r; dy++) { const yy = Math.min(h - 1, Math.max(0, y + dy)) * w; hist[a[yy + xo]]--; hist[a[yy + xn]]++; }
+      }
+    }
+    return out;
+  }
+  function minmax(a, w, h, r, isMin) { // separable erosion/dilation
+    const tmp = new Uint8ClampedArray(w * h), out = new Uint8ClampedArray(w * h);
+    const f = isMin ? Math.min : Math.max;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let v = a[y * w + x]; for (let k = -r; k <= r; k++) { const xx = x + k; if (xx >= 0 && xx < w) v = f(v, a[y * w + xx]); } tmp[y * w + x] = v;
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let v = tmp[y * w + x]; for (let k = -r; k <= r; k++) { const yy = y + k; if (yy >= 0 && yy < h) v = f(v, tmp[yy * w + x]); } out[y * w + x] = v;
+    }
+    return out;
+  }
+  // Remove textured background: dark strokes become black on white.
+  function clean(gray, w, h, opt) {
+    let g = opt.med ? median(gray, w, h, opt.med) : gray;
+    const bg = blur(g, w, h, opt.bg);
+    let diff = new Uint8ClampedArray(w * h);
+    for (let i = 0; i < diff.length; i++) diff[i] = bg[i] - g[i];
+    diff = stretch(diff, 0.01);
+    let b = new Uint8ClampedArray(w * h);
+    for (let i = 0; i < b.length; i++) b[i] = diff[i] > opt.thr ? 255 : 0;
+    if (opt.open) b = minmax(minmax(b, w, h, opt.open, true), w, h, opt.open, false);
+    for (let i = 0; i < b.length; i++) b[i] = 255 - b[i];
+    return b;
+  }
+  return { stretch, clean };
+})();
+
+// Fit OCR text to a template (# digit, L letter, ? any) and vote across several reads.
+const PARSE = (() => {
+  const TO_DIGIT = { O: '0', Q: '0', D: '0', U: '0', I: '1', L: '1', T: '1', J: '1', Z: '2', E: '3', A: '4', S: '5', G: '6', B: '8' };
+  const TO_LETTER = { '0': 'C', '8': 'B', '5': 'S', '2': 'Z', '1': 'I', '6': 'G', '4': 'A' };
+  const isD = c => c >= '0' && c <= '9', isL = c => c >= 'A' && c <= 'Z';
+
+  function cell(c, f) { // -> [score, char, mark]
+    if (f === '#') {
+      if (isD(c)) return [2, c, ''];
+      if (TO_DIGIT[c]) return [1, TO_DIGIT[c], 'fix'];
+      return [-1.5, c, 'bad'];
+    }
+    if (f === 'L') {
+      if (isL(c)) return [2, c, ''];
+      if (TO_LETTER[c]) return [0.6, TO_LETTER[c], 'bad'];
+      return [-1.5, c, 'bad'];
+    }
+    return [1.5, c, ''];
+  }
+
+  // Best alignment of raw (noisy) string onto the template.
+  function align(raw, fmt) {
+    const n = raw.length, L = fmt.length, NEG = -1e9;
+    const dp = Array.from({ length: n + 1 }, () => new Float64Array(L + 1).fill(NEG));
+    const bp = Array.from({ length: n + 1 }, () => new Int8Array(L + 1));
+    dp[0][0] = 0;
+    for (let i = 0; i <= n; i++) for (let j = 0; j <= L; j++) {
+      const v = dp[i][j]; if (v === NEG) continue;
+      if (i < n) { const c = (j === 0 || j === L) ? 0.25 : 1.3; if (v - c > dp[i + 1][j]) { dp[i + 1][j] = v - c; bp[i + 1][j] = 1; } }
+      if (j < L) { const m = (i === 0 || i === n) ? 1.0 : 1.8; if (v - m > dp[i][j + 1]) { dp[i][j + 1] = v - m; bp[i][j + 1] = 2; } }
+      if (i < n && j < L) { const s = cell(raw[i], fmt[j])[0]; if (v + s > dp[i + 1][j + 1]) { dp[i + 1][j + 1] = v + s; bp[i + 1][j + 1] = 3; } }
+    }
+    const chars = new Array(L).fill('?'), marks = new Array(L).fill('bad');
+    let i = n, j = L;
+    while (i > 0 || j > 0) {
+      const b = bp[i][j];
+      if (b === 1) i--;
+      else if (b === 2) { j--; chars[j] = '?'; marks[j] = 'miss'; }
+      else { i--; j--; const [, ch, mk] = cell(raw[i], fmt[j]); chars[j] = ch; marks[j] = mk; }
+    }
+    return { score: dp[n][L], chars, marks };
+  }
+
+  function clean(text) {
+    return text.toUpperCase().split(/\n/).map(l => l.replace(/[^0-9A-Z]/g, '')).filter(l => l.length >= 2);
+  }
+
+  // Best single fit for one OCR text.
+  function fitText(text, fmt) {
+    const lines = clean(text);
+    if (!lines.length) return null;
+    const cands = new Set([lines.join('')]);
+    for (let a = 0; a < lines.length; a++) for (let b = a; b < lines.length; b++) cands.add(lines.slice(a, b + 1).join(''));
+    let best = null;
+    cands.forEach(c => { const r = align(c, fmt); if (!best || r.score > best.score) best = r; });
+    return best;
+  }
+
+  // Weighted per-position vote across several fits.
+  function vote(fits, fmt) {
+    const L = fmt.length, max = 2 * L;
+    const good = fits.filter(f => f && f.score > max * 0.3);
+    if (!good.length) return null;
+    const chars = [], marks = [];
+    let agree = 0;
+    for (let j = 0; j < L; j++) {
+      const tally = {}, fixOnly = {};
+      let total = 0;
+      good.forEach(f => {
+        const ch = f.chars[j]; if (ch === '?') return;
+        const w = Math.max(0.5, f.score) * (f.marks[j] === 'bad' ? 0.35 : f.marks[j] === 'fix' ? 0.75 : 1);
+        tally[ch] = (tally[ch] || 0) + w; total += w;
+        if (f.marks[j] !== 'fix') fixOnly[ch] = false; else if (fixOnly[ch] === undefined) fixOnly[ch] = true;
+      });
+      const keys = Object.keys(tally);
+      if (!keys.length) { chars.push('?'); marks.push('bad'); continue; }
+      keys.sort((a, b) => tally[b] - tally[a]);
+      const win = keys[0], share = tally[win] / total;
+      chars.push(win);
+      const strong = good.filter(f => f.chars[j] === win && f.marks[j] === '').length;
+      if (share < 0.6 || strong === 0 && fmt[j] === 'L') marks.push('bad');
+      else if (fixOnly[win]) marks.push('fix');
+      else { marks.push(''); agree++; }
+    }
+    return { code: chars.join(''), marks, agree, n: good.length };
+  }
+
+  return { fitText, vote, align };
+})();
+
+// Rotated, scaled grayscale copy of the source (long side = size px).
+function grayOf(src, rot, size) {
+  const k = size / Math.max(src.width, src.height);
+  const sw = Math.max(1, Math.round(src.width * k)), sh = Math.max(1, Math.round(src.height * k));
+  const side = rot === 90 || rot === 270;
   const cv = document.createElement('canvas');
-  const sideways = rot === 90 || rot === 270;
-  cv.width = sideways ? sh : sw; cv.height = sideways ? sw : sh;
-  const g = cv.getContext('2d');
+  cv.width = side ? sh : sw; cv.height = side ? sw : sh;
+  const g = cv.getContext('2d', { willReadFrequently: true });
   g.imageSmoothingQuality = 'high';
   g.translate(cv.width / 2, cv.height / 2); g.rotate(rot * Math.PI / 180);
   g.drawImage(src, -sw / 2, -sh / 2, sw, sh);
-  const img = g.getImageData(0, 0, cv.width, cv.height), d = img.data;
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < d.length; i += 4) { const y = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0; d[i] = y; hist[y]++; }
-  const n = d.length / 4; let acc = 0, lo = 0, hi = 255;
-  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > n * 0.01) { lo = i; break; } }
-  acc = 0; for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > n * 0.01) { hi = i; break; } }
-  const span = Math.max(1, hi - lo);
-  for (let i = 0; i < d.length; i += 4) { const y = Math.max(0, Math.min(255, ((d[i] - lo) * 255 / span) | 0)); d[i] = d[i + 1] = d[i + 2] = y; }
-  g.setTransform(1, 0, 0, 1, 0, 0); g.putImageData(img, 0, 0);
-  return cv;
+  const d = g.getImageData(0, 0, cv.width, cv.height).data;
+  const a = new Uint8ClampedArray(cv.width * cv.height);
+  for (let i = 0, j = 0; j < a.length; i += 4, j++) a[j] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+  return { a: IMG.stretch(a, 0.01), w: cv.width, h: cv.height };
 }
-
-const TO_DIGIT = { O: '0', Q: '0', D: '0', U: '0', I: '1', L: '1', T: '1', J: '1', Z: '2', E: '3', A: '4', S: '5', G: '6', B: '8' };
-const TO_LETTER = { '0': 'C', '8': 'B', '5': 'S', '2': 'Z', '1': 'I', '6': 'G', '4': 'A' };
-
-// Fit a string to the template. Returns {code, score, marks[]} where marks: '' ok, 'fix' corrected, 'bad' unsure.
-function fit(raw, fmt) {
-  let score = 0; const out = [], marks = [];
-  for (let i = 0; i < fmt.length; i++) {
-    const c = raw[i], f = fmt[i];
-    if (f === '#') {
-      if (c >= '0' && c <= '9') { out.push(c); marks.push(''); score += 2; }
-      else if (TO_DIGIT[c]) { out.push(TO_DIGIT[c]); marks.push('fix'); score += 1; }
-      else { out.push(c); marks.push('bad'); }
-    } else if (f === 'L') {
-      if (c >= 'A' && c <= 'Z') { out.push(c); marks.push(''); score += 2; }
-      else if (TO_LETTER[c]) { out.push(TO_LETTER[c]); marks.push('bad'); }
-      else { out.push(c); marks.push('bad'); }
-    } else { out.push(c); marks.push(''); score += 1; }
-  }
-  return { code: out.join(''), score, marks };
+function canvasOf(a, w, h) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const g = cv.getContext('2d'), img = g.createImageData(w, h), d = img.data;
+  for (let i = 0, j = 0; j < a.length; i += 4, j++) { d[i] = d[i + 1] = d[i + 2] = a[j]; d[i + 3] = 255; }
+  g.putImageData(img, 0, 0); return cv;
 }
-
-function bestFromText(text, fmt, prefix) {
-  const lines = text.toUpperCase().split(/\n/).map(l => l.replace(/[^0-9A-Z]/g, '')).filter(l => l.length >= 3);
-  const pool = new Set();
-  const joined = lines.join('');
-  pool.add(joined);
-  for (let i = 0; i < lines.length - 1; i++) pool.add(lines[i] + lines[i + 1]);
-  lines.forEach(l => pool.add(l));
-  let best = null;
-  const tryCand = (cand, preLen) => {
-    const L = fmt.length;
-    const variants = [];
-    if (cand.length >= L) for (let i = 0; i + L <= cand.length; i++) variants.push(cand.substr(i, L));
-    else { variants.push(cand.padEnd(L, '?')); variants.push(cand.padStart(L, '?')); }
-    variants.forEach(v => {
-      const r = fit(v, fmt);
-      const lenPenalty = Math.abs(cand.length - L) * 1.5;
-      const total = r.score - lenPenalty;
-      if (!best || total > best.total) best = { ...r, total, preLen };
-    });
-  };
-  if (prefix) {
-    const restFmt = fmt.slice(prefix.length);
-    pool.forEach(c => {
-      const at = c.indexOf(prefix);
-      const rest = at >= 0 ? c.slice(at + prefix.length) : c;
-      const L = restFmt.length; if (!L) return;
-      const vars = rest.length >= L ? Array.from({ length: rest.length - L + 1 }, (_, i) => rest.substr(i, L)) : [rest.padEnd(L, '?')];
-      vars.forEach(v => {
-        const r = fit(v, restFmt);
-        const total = r.score - Math.abs(rest.length - L) * 1.5;
-        if (!best || total > best.total) best = { code: prefix + r.code, marks: Array(prefix.length).fill('').concat(r.marks), score: r.score, total };
-      });
-    });
-  } else pool.forEach(c => tryCand(c));
-  return best;
+// One image variant: plain gray, or background removed (for textured metal).
+function variant(src, rot, v) {
+  const g = grayOf(src, rot, v.size);
+  if (!v.clean) return canvasOf(g.a, g.w, g.h);
+  return canvasOf(IMG.clean(g.a, g.w, g.h, v.clean), g.w, g.h);
 }
+const PROBE = { size: 700, clean: { med: 1, bg: 20, thr: 100, open: 1 } };
+const PASSES = [
+  { size: 500 },
+  { size: 700, clean: { med: 1, bg: 20, thr: 130, open: 1 } },
+  { size: 700 },
+  { size: 700, clean: { med: 1, bg: 12, thr: 110, open: 1 } },
+  { size: 500, clean: { med: 1, bg: 14, thr: 100, open: 1 } },
+  { size: 1000, clean: { med: 1, bg: 29, thr: 100, open: 1 } }
+];
 
 async function readImage(src) {
-  const fmt = ($('fmt').value.trim().toUpperCase() || '######L#####L###');
+  const fullFmt = ($('fmt').value.trim().toUpperCase() || '######L#####L###');
   const prefix = $('prefix').value.trim().toUpperCase();
+  const fmt = prefix ? fullFmt.slice(prefix.length) || fullFmt : fullFmt;
   scanStatus('Preparando el lector… (la primera vez tarda un poco más)');
   let worker;
   try { worker = await loadOcr(); }
   catch (e) { scanStatus('No se pudo cargar el lector de texto. Se necesita internet la primera vez que lo usas.', 'bad'); return; }
-  const maxScore = (fmt.length - (prefix ? prefix.length : 0)) * 2;
-  let best = null, rawAll = '';
-  const rots = [270, 90, 0, 180];
+  const max = 2 * fmt.length;
+  let raw = '';
+  const ocr = async (cv, label) => {
+    const { data } = await worker.recognize(cv);
+    const t = (data.text || '').trim();
+    raw += '[' + label + '] ' + t.replace(/\n/g, ' / ') + '\n';
+    return PARSE.fitText(t, fmt);
+  };
+
+  // 1) Find which way the text is turned.
+  const rots = [0, 270, 90, 180];
+  let rot = 0, bestProbe = null, fits = [];
   for (let i = 0; i < rots.length; i++) {
-    scanStatus('Leyendo… intento ' + (i + 1) + ' de ' + rots.length);
-    const { data } = await worker.recognize(prepare(src, rots[i]));
-    rawAll += '[' + rots[i] + '°] ' + (data.text || '').trim() + '\n';
-    const r = bestFromText(data.text || '', fmt, prefix);
-    if (r) { r.conf = data.confidence; r.rot = rots[i]; if (!best || r.total > best.total || (r.total === best.total && r.conf > best.conf)) best = r; }
-    if (best && best.total >= maxScore - 1 && best.marks.every(m => m !== 'bad')) break;
+    scanStatus('Buscando el texto… ' + (i + 1) + ' de ' + rots.length);
+    const f = await ocr(variant(src, rots[i], PROBE), rots[i] + '° limpio');
+    if (f && (!bestProbe || f.score > bestProbe.score)) { bestProbe = f; rot = rots[i]; }
+    if (bestProbe && bestProbe.score > max * 0.8) break;
+    if (i === 2 && bestProbe && bestProbe.score > max * 0.45) break;
   }
-  $('scan-raw').textContent = rawAll.trim();
-  if (!best || best.total < maxScore * 0.4) {
-    scanStatus('No pude leer el número. Acércate un poco, evita reflejos y vuelve a intentar.', 'bad');
+  if (bestProbe) fits.push(bestProbe);
+
+  // 2) Read it several ways and vote character by character.
+  for (let i = 0; i < PASSES.length; i++) {
+    scanStatus('Leyendo… pasada ' + (i + 1) + ' de ' + PASSES.length);
+    fits.push(await ocr(variant(src, rot, PASSES[i]), rot + '° ' + (PASSES[i].clean ? 'limpio' : 'normal') + ' ' + PASSES[i].size));
+    const v = PARSE.vote(fits, fmt);
+    if (i >= 2 && v && v.agree === fmt.length && v.n >= 3) break;
+  }
+  $('scan-raw').textContent = raw.trim();
+  const res = PARSE.vote(fits, fmt);
+  if (!res || res.agree < fmt.length * 0.4) {
+    scanStatus('No pude leer el número. Acércate, enfoca bien, evita reflejos y vuelve a intentar.', 'bad');
     $('scan-result').hidden = true; return;
   }
-  showResult(best.code, best.marks);
-  const unsure = best.marks.filter(m => m === 'bad').length, fixed = best.marks.filter(m => m === 'fix').length;
-  scanStatus(unsure ? 'Listo, pero hay caracteres dudosos marcados en rojo.' : 'Listo. Revisa que coincida con la pieza.', unsure ? 'bad' : 'ok');
-  $('scan-note').textContent = (unsure ? 'Rojo: no estoy seguro, corrígelo si hace falta. ' : '') + (fixed ? 'Amarillo: corregido según el formato (por ejemplo O → 0).' : '');
+  const code = (prefix && fmt !== fullFmt ? prefix : '') + res.code;
+  const marks = (prefix && fmt !== fullFmt ? Array(prefix.length).fill('') : []).concat(res.marks);
+  showResult(code, marks);
+  const unsure = marks.filter(m => m === 'bad').length, fixed = marks.filter(m => m === 'fix').length;
+  scanStatus(unsure ? 'Listo. Revisa los caracteres en rojo contra la pieza.' : 'Listo. Revisa que coincida con la pieza.', unsure ? 'bad' : 'ok');
+  $('scan-note').textContent = (unsure ? 'Rojo: no estoy seguro de ese carácter, corrígelo si hace falta. ' : '') + (fixed ? 'Amarillo: corregido según el formato (por ejemplo O → 0).' : '');
 }
 
 function showResult(code, marks) {
