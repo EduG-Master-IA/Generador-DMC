@@ -109,6 +109,28 @@ textarea { min-height: 180px; resize: vertical; line-height: 1.6; font-size: 0.9
 .cell.bad { background: var(--err-soft); color: var(--err); }
 .cell button { font: 600 0.75rem var(--font-body); border: 1px solid #d3dae2; background: #f4f6f8; color: #16202b; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 .count { font: 500 0.85rem var(--font-mono); color: var(--muted); }
+.scan-actions { margin-top: 10px; }
+.scan-btn { display: inline-flex; align-items: center; gap: 8px; color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.scanner { position: fixed; inset: 0; z-index: 50; background: rgba(10, 14, 20, 0.6); display: grid; place-items: start center; overflow-y: auto;
+  padding: calc(12px + env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
+.scan-box { background: var(--panel); color: var(--ink); width: 100%; max-width: 560px; border-radius: 14px; padding: 16px; display: grid; gap: 12px; }
+.scan-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.scan-head h2 { font-family: var(--font-display); font-size: 1.25rem; margin: 0; }
+.cam { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 10px; overflow: hidden; max-width: 100%; }
+.cam video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.guide { position: absolute; left: 12%; right: 12%; top: 32%; bottom: 32%; border: 3px solid #ffffff; border-radius: 8px; box-shadow: 0 0 0 9999px rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; }
+.guide span { transform: translateY(calc(100% + 8px)); color: #fff; font-size: 0.8rem; font-weight: 600; text-shadow: 0 1px 2px #000; text-align: center; }
+.cam-msg { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 20px; color: #fff; background: rgba(0,0,0,.75); font-size: 0.92rem; }
+.scan-result { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+#scan-code { font-size: 1.3rem; letter-spacing: 0.06em; }
+.chars { display: flex; flex-wrap: wrap; gap: 4px; }
+.chars span { font: 600 0.95rem var(--font-mono); min-width: 1.6em; text-align: center; padding: 3px 0; border-radius: 5px; background: var(--bg); border: 1px solid var(--line); }
+.chars span.fix { background: #fff4d6; color: #7a4d00; border-color: #e0b44a; }
+.chars span.bad { background: var(--err-soft); color: var(--err); border-color: var(--err); }
+.raw summary, .scan-settings summary { cursor: pointer; color: var(--muted); font-size: 0.88rem; }
+.raw pre { font: 0.8rem var(--font-mono); white-space: pre-wrap; background: var(--bg); padding: 8px; border-radius: 6px; margin: 6px 0 0; }
+.scan-settings { border-top: 1px solid var(--line); padding-top: 10px; }
+.scan-settings .row { margin-top: 10px; }
 @media (prefers-reduced-motion: no-preference) { .label-card img { transition: opacity .12s; } }
 </style>
 
@@ -134,6 +156,12 @@ textarea { min-height: 180px; resize: vertical; line-height: 1.6; font-size: 0.9
         <label class="lbl" for="txt">Contenido del código</label>
         <input id="txt" type="text" value="846383C26300D066" autocomplete="off" spellcheck="false">
         <p class="hint">Se respetan mayúsculas y minúsculas: <b>C</b> y <b>c</b> generan códigos distintos.</p>
+        <div class="actions scan-actions">
+          <button id="scan-open" class="btn scan-btn" type="button">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M7 12h10"/></svg>
+            Leer número con la cámara
+          </button>
+        </div>
       </div>
       <div class="row">
         <div class="field">
@@ -175,6 +203,7 @@ textarea { min-height: 180px; resize: vertical; line-height: 1.6; font-size: 0.9
       <p class="hint">Puedes pegar una columna de Excel. Los renglones vacíos se ignoran. Usa el tamaño, la resolución y las opciones de texto de la pestaña "Un código".</p>
     </div>
     <div class="actions">
+      <button id="scan-open2" class="btn scan-btn" type="button">Leer piezas con la cámara</button>
       <button id="dl-zip" class="btn primary">Descargar todos (ZIP de PNG)</button>
       <button id="dl-sheet" class="btn">Descargar hoja con todos (PNG)</button>
       <span class="count" id="count"></span>
@@ -182,6 +211,55 @@ textarea { min-height: 180px; resize: vertical; line-height: 1.6; font-size: 0.9
     <div id="bstatus" class="status"></div>
     <div class="sheet" id="sheet"></div>
   </section>
+</div>
+
+<!-- Scanner -->
+<div id="scanner" class="scanner" hidden role="dialog" aria-modal="true" aria-labelledby="scan-title">
+  <div class="scan-box">
+    <div class="scan-head">
+      <h2 id="scan-title">Leer número de la pieza</h2>
+      <button id="scan-close" class="btn" type="button">Cerrar</button>
+    </div>
+    <div class="cam" id="cam">
+      <video id="video" playsinline muted autoplay></video>
+      <div class="guide" id="guide"><span>Acomoda aquí el número impreso</span></div>
+      <div class="cam-msg" id="cam-msg" hidden></div>
+    </div>
+    <p class="hint">Pon el texto (los números, no el cuadrito) dentro del recuadro. Puede estar acostado o parado, la app lo gira sola. Usa buena luz y evita reflejos.</p>
+    <div class="actions">
+      <button id="scan-read" class="btn primary" type="button">Leer número</button>
+      <label class="btn" for="scan-file">Usar una foto</label>
+      <input id="scan-file" type="file" accept="image/*" capture="environment" hidden>
+    </div>
+    <div id="scan-status" class="status"></div>
+
+    <div id="scan-result" class="scan-result" hidden>
+      <label class="lbl" for="scan-code">Número leído (revísalo contra la pieza)</label>
+      <input id="scan-code" type="text" autocomplete="off" spellcheck="false">
+      <div id="scan-chars" class="chars" aria-hidden="true"></div>
+      <p class="hint" id="scan-note"></p>
+      <div class="actions">
+        <button id="scan-use" class="btn primary" type="button">Usar este número</button>
+        <button id="scan-add" class="btn" type="button">Agregar a la lista</button>
+      </div>
+      <details class="raw"><summary>Texto que leyó la cámara</summary><pre id="scan-raw"></pre></details>
+    </div>
+
+    <details class="scan-settings">
+      <summary>Formato del número</summary>
+      <div class="row">
+        <div class="field">
+          <label class="lbl" for="fmt">Formato</label>
+          <input id="fmt" type="text" value="######L#####L###" spellcheck="false">
+        </div>
+        <div class="field">
+          <label class="lbl" for="prefix">Inicio fijo (opcional)</label>
+          <input id="prefix" type="text" value="" placeholder="ej. 846383C" spellcheck="false">
+        </div>
+      </div>
+      <p class="hint"><b>#</b> = número, <b>L</b> = letra, <b>?</b> = cualquiera. El formato de fábrica es <b>######L#####L###</b>, como 846383C26283C055. Si el inicio siempre es el mismo número de parte, escríbelo en "Inicio fijo" y la cámara solo tendrá que leer el resto.</p>
+    </details>
+  </div>
 </div>
 
 <script>
@@ -515,6 +593,239 @@ $('dl-sheet').addEventListener('click', async () => {
   const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);
   tiles.forEach((t, i) => g.drawImage(t, gap + (i % cols) * (tw + gap), gap + Math.floor(i / cols) * (th + gap)));
   save('hoja_DMC_' + tiles.length + '.png', await canvasBlob(cv), $('bstatus'));
+});
+
+// ---------- Camera scanner (OCR) ----------
+const SC = { stream: null, worker: null, loading: null };
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+$('fmt').value = store.get('dmc_fmt', $('fmt').value);
+$('prefix').value = store.get('dmc_prefix', '');
+$('fmt').addEventListener('input', () => store.set('dmc_fmt', $('fmt').value.trim().toUpperCase()));
+$('prefix').addEventListener('input', () => store.set('dmc_prefix', $('prefix').value.trim().toUpperCase()));
+
+function scanStatus(msg, cls) { $('scan-status').className = 'status' + (cls ? ' ' + cls : ''); $('scan-status').textContent = msg; }
+
+async function openScanner() {
+  $('scanner').hidden = false;
+  $('scan-result').hidden = true;
+  scanStatus('');
+  loadOcr().catch(() => {});
+  const msg = $('cam-msg'); msg.hidden = true;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg.textContent = 'La cámara en vivo no está disponible aquí. Usa el botón "Usar una foto".'; msg.hidden = false; return;
+  }
+  try {
+    SC.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    const v = $('video'); v.srcObject = SC.stream; await v.play().catch(() => {});
+  } catch (e) {
+    msg.textContent = 'No se pudo abrir la cámara. Revisa que le diste permiso al navegador, o usa el botón "Usar una foto".'; msg.hidden = false;
+  }
+}
+function closeScanner() {
+  if (SC.stream) { SC.stream.getTracks().forEach(t => t.stop()); SC.stream = null; }
+  $('video').srcObject = null;
+  $('scanner').hidden = true;
+}
+$('scan-open').addEventListener('click', openScanner);
+$('scan-open2').addEventListener('click', openScanner);
+$('scan-close').addEventListener('click', closeScanner);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('scanner').hidden) closeScanner(); });
+
+function loadOcr() {
+  if (SC.worker) return Promise.resolve(SC.worker);
+  if (SC.loading) return SC.loading;
+  SC.loading = new Promise((resolve, reject) => {
+    const go = async () => {
+      try {
+        const w = await Tesseract.createWorker('eng', 1);
+        await w.setParameters({ tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', tessedit_pageseg_mode: '6' });
+        SC.worker = w; resolve(w);
+      } catch (e) { SC.loading = null; reject(e); }
+    };
+    if (window.Tesseract) return go();
+    const sc = document.createElement('script');
+    sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+    sc.onload = go;
+    sc.onerror = () => { SC.loading = null; reject(new Error('load')); };
+    document.head.appendChild(sc);
+  });
+  return SC.loading;
+}
+
+// Crop the guide area out of the live video frame.
+function grabGuide() {
+  const v = $('video'), cam = $('cam'), g = $('guide');
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if (!vw || !vh) return null;
+  const cr = cam.getBoundingClientRect(), gr = g.getBoundingClientRect();
+  const scale = Math.max(cr.width / vw, cr.height / vh);
+  const offX = (vw * scale - cr.width) / 2, offY = (vh * scale - cr.height) / 2;
+  const x = (gr.left - cr.left + offX) / scale, y = (gr.top - cr.top + offY) / scale;
+  const w = gr.width / scale, h = gr.height / scale;
+  const cv = document.createElement('canvas'); cv.width = Math.round(w); cv.height = Math.round(h);
+  cv.getContext('2d').drawImage(v, x, y, w, h, 0, 0, cv.width, cv.height);
+  return cv;
+}
+
+// Grayscale + upscale + contrast stretch, optionally rotated.
+function prepare(src, rot) {
+  const target = 1400;
+  const longSide = Math.max(src.width, src.height);
+  const k = Math.min(4, Math.max(1, target / longSide));
+  const sw = Math.round(src.width * k), sh = Math.round(src.height * k);
+  const cv = document.createElement('canvas');
+  const sideways = rot === 90 || rot === 270;
+  cv.width = sideways ? sh : sw; cv.height = sideways ? sw : sh;
+  const g = cv.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.translate(cv.width / 2, cv.height / 2); g.rotate(rot * Math.PI / 180);
+  g.drawImage(src, -sw / 2, -sh / 2, sw, sh);
+  const img = g.getImageData(0, 0, cv.width, cv.height), d = img.data;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4) { const y = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0; d[i] = y; hist[y]++; }
+  const n = d.length / 4; let acc = 0, lo = 0, hi = 255;
+  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > n * 0.01) { lo = i; break; } }
+  acc = 0; for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > n * 0.01) { hi = i; break; } }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0; i < d.length; i += 4) { const y = Math.max(0, Math.min(255, ((d[i] - lo) * 255 / span) | 0)); d[i] = d[i + 1] = d[i + 2] = y; }
+  g.setTransform(1, 0, 0, 1, 0, 0); g.putImageData(img, 0, 0);
+  return cv;
+}
+
+const TO_DIGIT = { O: '0', Q: '0', D: '0', U: '0', I: '1', L: '1', T: '1', J: '1', Z: '2', E: '3', A: '4', S: '5', G: '6', B: '8' };
+const TO_LETTER = { '0': 'C', '8': 'B', '5': 'S', '2': 'Z', '1': 'I', '6': 'G', '4': 'A' };
+
+// Fit a string to the template. Returns {code, score, marks[]} where marks: '' ok, 'fix' corrected, 'bad' unsure.
+function fit(raw, fmt) {
+  let score = 0; const out = [], marks = [];
+  for (let i = 0; i < fmt.length; i++) {
+    const c = raw[i], f = fmt[i];
+    if (f === '#') {
+      if (c >= '0' && c <= '9') { out.push(c); marks.push(''); score += 2; }
+      else if (TO_DIGIT[c]) { out.push(TO_DIGIT[c]); marks.push('fix'); score += 1; }
+      else { out.push(c); marks.push('bad'); }
+    } else if (f === 'L') {
+      if (c >= 'A' && c <= 'Z') { out.push(c); marks.push(''); score += 2; }
+      else if (TO_LETTER[c]) { out.push(TO_LETTER[c]); marks.push('bad'); }
+      else { out.push(c); marks.push('bad'); }
+    } else { out.push(c); marks.push(''); score += 1; }
+  }
+  return { code: out.join(''), score, marks };
+}
+
+function bestFromText(text, fmt, prefix) {
+  const lines = text.toUpperCase().split(/\n/).map(l => l.replace(/[^0-9A-Z]/g, '')).filter(l => l.length >= 3);
+  const pool = new Set();
+  const joined = lines.join('');
+  pool.add(joined);
+  for (let i = 0; i < lines.length - 1; i++) pool.add(lines[i] + lines[i + 1]);
+  lines.forEach(l => pool.add(l));
+  let best = null;
+  const tryCand = (cand, preLen) => {
+    const L = fmt.length;
+    const variants = [];
+    if (cand.length >= L) for (let i = 0; i + L <= cand.length; i++) variants.push(cand.substr(i, L));
+    else { variants.push(cand.padEnd(L, '?')); variants.push(cand.padStart(L, '?')); }
+    variants.forEach(v => {
+      const r = fit(v, fmt);
+      const lenPenalty = Math.abs(cand.length - L) * 1.5;
+      const total = r.score - lenPenalty;
+      if (!best || total > best.total) best = { ...r, total, preLen };
+    });
+  };
+  if (prefix) {
+    const restFmt = fmt.slice(prefix.length);
+    pool.forEach(c => {
+      const at = c.indexOf(prefix);
+      const rest = at >= 0 ? c.slice(at + prefix.length) : c;
+      const L = restFmt.length; if (!L) return;
+      const vars = rest.length >= L ? Array.from({ length: rest.length - L + 1 }, (_, i) => rest.substr(i, L)) : [rest.padEnd(L, '?')];
+      vars.forEach(v => {
+        const r = fit(v, restFmt);
+        const total = r.score - Math.abs(rest.length - L) * 1.5;
+        if (!best || total > best.total) best = { code: prefix + r.code, marks: Array(prefix.length).fill('').concat(r.marks), score: r.score, total };
+      });
+    });
+  } else pool.forEach(c => tryCand(c));
+  return best;
+}
+
+async function readImage(src) {
+  const fmt = ($('fmt').value.trim().toUpperCase() || '######L#####L###');
+  const prefix = $('prefix').value.trim().toUpperCase();
+  scanStatus('Preparando el lector… (la primera vez tarda un poco más)');
+  let worker;
+  try { worker = await loadOcr(); }
+  catch (e) { scanStatus('No se pudo cargar el lector de texto. Se necesita internet la primera vez que lo usas.', 'bad'); return; }
+  const maxScore = (fmt.length - (prefix ? prefix.length : 0)) * 2;
+  let best = null, rawAll = '';
+  const rots = [270, 90, 0, 180];
+  for (let i = 0; i < rots.length; i++) {
+    scanStatus('Leyendo… intento ' + (i + 1) + ' de ' + rots.length);
+    const { data } = await worker.recognize(prepare(src, rots[i]));
+    rawAll += '[' + rots[i] + '°] ' + (data.text || '').trim() + '\n';
+    const r = bestFromText(data.text || '', fmt, prefix);
+    if (r) { r.conf = data.confidence; r.rot = rots[i]; if (!best || r.total > best.total || (r.total === best.total && r.conf > best.conf)) best = r; }
+    if (best && best.total >= maxScore - 1 && best.marks.every(m => m !== 'bad')) break;
+  }
+  $('scan-raw').textContent = rawAll.trim();
+  if (!best || best.total < maxScore * 0.4) {
+    scanStatus('No pude leer el número. Acércate un poco, evita reflejos y vuelve a intentar.', 'bad');
+    $('scan-result').hidden = true; return;
+  }
+  showResult(best.code, best.marks);
+  const unsure = best.marks.filter(m => m === 'bad').length, fixed = best.marks.filter(m => m === 'fix').length;
+  scanStatus(unsure ? 'Listo, pero hay caracteres dudosos marcados en rojo.' : 'Listo. Revisa que coincida con la pieza.', unsure ? 'bad' : 'ok');
+  $('scan-note').textContent = (unsure ? 'Rojo: no estoy seguro, corrígelo si hace falta. ' : '') + (fixed ? 'Amarillo: corregido según el formato (por ejemplo O → 0).' : '');
+}
+
+function showResult(code, marks) {
+  $('scan-result').hidden = false;
+  $('scan-code').value = code;
+  const box = $('scan-chars'); box.innerHTML = '';
+  [...code].forEach((ch, i) => { const s = document.createElement('span'); s.textContent = ch; if (marks && marks[i]) s.className = marks[i]; box.appendChild(s); });
+}
+$('scan-code').addEventListener('input', () => showResult($('scan-code').value.toUpperCase().replace(/\s+/g, ''), null));
+
+$('scan-read').addEventListener('click', async () => {
+  const cv = grabGuide();
+  if (!cv) { scanStatus('La cámara todavía no está lista. Espera un segundo o usa una foto.', 'bad'); return; }
+  $('scan-read').disabled = true;
+  try { await readImage(cv); } catch (e) { scanStatus('Algo falló al leer. Intenta de nuevo.', 'bad'); }
+  $('scan-read').disabled = false;
+});
+$('scan-file').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  const img = new Image();
+  img.onload = async () => {
+    const cv = document.createElement('canvas'); const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+    cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+    URL.revokeObjectURL(img.src);
+    try { await readImage(cv); } catch (err) { scanStatus('Algo falló al leer la foto. Intenta con otra más cerca del número.', 'bad'); }
+  };
+  img.onerror = () => scanStatus('No se pudo abrir esa imagen.', 'bad');
+  img.src = URL.createObjectURL(f);
+});
+
+$('scan-use').addEventListener('click', () => {
+  const code = $('scan-code').value.trim().toUpperCase();
+  if (!code) return;
+  $('txt').value = code; closeScanner(); show('one'); renderOne(); renderBatch();
+  $('status').className = 'status ok'; $('status').textContent = 'Número leído con la cámara: ' + code;
+});
+$('scan-add').addEventListener('click', () => {
+  const code = $('scan-code').value.trim().toUpperCase();
+  if (!code) return;
+  const cur = $('list').value.replace(/\s+$/, '');
+  $('list').value = (cur ? cur + '\n' : '') + code;
+  renderBatch();
+  scanStatus('Agregado a la lista (' + lines().length + ' códigos). Puedes leer la siguiente pieza.', 'ok');
+  $('scan-result').hidden = true;
 });
 
 // ---------- Tabs ----------
